@@ -759,7 +759,7 @@ textarea.field{min-height:96px;resize:vertical}
           <tbody id="adminBody"></tbody>
         </table>
       </div>
-      <p class="note">Lưu ý: phiên bản này lưu dữ liệu trên chính trình duyệt đang sử dụng. Khi chuyển sang phiên bản trực tuyến nhiều người dùng, dữ liệu sẽ được chuyển sang cơ sở dữ liệu máy chủ.</p>
+      <p class="note">Dữ liệu bài học, tệp đính kèm và tài khoản quản trị được lưu trực tuyến bằng Supabase. Quyền đăng, sửa và xóa được bảo vệ bằng Supabase Auth và Row Level Security.</p>
     </section>
   </main>
 
@@ -782,15 +782,15 @@ textarea.field{min-height:96px;resize:vertical}
     <div class="dialog-body">
       <form id="loginForm">
         <div class="form-row">
-          <label>Tên đăng nhập</label>
-          <input class="field" id="adminUsername" autocomplete="username" value="admin" required />
+          <label>Email quản trị</label>
+          <input class="field" id="adminUsername" type="email" autocomplete="username" placeholder="admin@truong.edu.vn" required />
         </div>
         <div class="form-row" style="margin-top:12px">
           <label>Mật khẩu</label>
           <input class="field" id="adminPassword" type="password" autocomplete="current-password" required />
         </div>
         <div class="note" style="margin-top:12px">
-          Tài khoản mặc định lần đầu: <b>admin</b> / <b>123456</b>. Sau khi đăng nhập, nên đổi mật khẩu ngay.
+          Đăng nhập bằng tài khoản đã tạo trong <b>Supabase Authentication</b> và đã được cấp quyền trong bảng <b>admins</b>.
         </div>
         <div class="dialog-actions">
           <button type="button" class="btn btn-soft" onclick="closeModal('loginModal')">Hủy</button>
@@ -892,115 +892,144 @@ textarea.field{min-height:96px;resize:vertical}
 
 <div class="toast" id="toast"></div>
 
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<script src="supabase-config.js"></script>
 <script>
-const DB_NAME = 'MaiSonDigitalLessonsDB';
-const DB_VERSION = 1;
-const STORE = 'files';
-let db = null;
-let lessons = JSON.parse(localStorage.getItem('maiSonLessons') || '[]');
+const CONFIG = window.SUPABASE_CONFIG || {};
+const STORAGE_BUCKET = CONFIG.bucket || 'lesson-files';
+const SUPABASE_CONFIGURED = Boolean(
+  CONFIG.url && CONFIG.publishableKey &&
+  !String(CONFIG.url).includes('YOUR_') &&
+  !String(CONFIG.publishableKey).includes('YOUR_')
+);
 
-let isAdmin = sessionStorage.getItem('maiSonAdminSession') === '1';
+let supabaseClient = null;
+let lessons = [];
+let currentUser = null;
+let isAdmin = false;
 
-function getAdminAccount(){
-  const saved = JSON.parse(localStorage.getItem('maiSonAdminAccount') || 'null');
-  return saved || {username:'admin', password:'123456'};
+if (SUPABASE_CONFIGURED && window.supabase) {
+  supabaseClient = window.supabase.createClient(CONFIG.url, CONFIG.publishableKey, {
+    auth: { persistSession: true, autoRefreshToken: true, detectSessionInUrl: true }
+  });
 }
-function saveAdminAccount(account){
-  localStorage.setItem('maiSonAdminAccount', JSON.stringify(account));
+
+function uid(){
+  return crypto.randomUUID ? crypto.randomUUID() : 'id-'+Date.now()+'-'+Math.random().toString(16).slice(2);
+}
+function escapeHtml(s=''){
+  return String(s).replace(/[&<>"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[m]));
+}
+function showToast(msg){
+  const t=document.getElementById('toast');
+  t.textContent=msg;
+  t.classList.add('show');
+  setTimeout(()=>t.classList.remove('show'),2600);
+}
+function fmt(n){return new Intl.NumberFormat('vi-VN').format(n||0)}
+function closeModal(id){document.getElementById(id)?.classList.add('hidden')}
+function safeFileName(name='file'){
+  const parts=String(name).split('.');
+  const ext=parts.length>1?'.'+parts.pop().replace(/[^a-zA-Z0-9]/g,''):'';
+  let base=parts.join('.') || 'file';
+  base=base.normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/[đĐ]/g,'d')
+    .replace(/[^a-zA-Z0-9_-]+/g,'-').replace(/-+/g,'-').replace(/^-|-$/g,'');
+  return (base||'file').slice(0,90)+ext.toLowerCase();
+}
+function publicFileUrl(path, download=false){
+  if(!supabaseClient || !path) return '';
+  const opts = download ? {download:true} : undefined;
+  return supabaseClient.storage.from(STORAGE_BUCKET).getPublicUrl(path, opts).data.publicUrl;
+}
+function fromDbLesson(r){
+  return {
+    id:r.id,
+    title:r.title||'',
+    level:r.level||'',
+    grade:r.grade||'',
+    subject:r.subject||'',
+    teacher:r.teacher||'',
+    schoolYear:r.school_year||'',
+    tags:r.tags||'',
+    description:r.description||'',
+    coverUrl:r.cover_url||'',
+    lessonUrl:r.lesson_url||'',
+    views:Number(r.views||0),
+    downloads:Number(r.downloads||0),
+    createdAt:r.created_at ? Date.parse(r.created_at) : Date.now(),
+    files:(r.lesson_files||[]).map(f=>({
+      id:f.id,
+      name:f.name,
+      type:f.mime_type||'',
+      size:Number(f.size_bytes||0),
+      path:f.storage_path,
+      url:publicFileUrl(f.storage_path)
+    }))
+  };
+}
+function formPayload(){
+  return {
+    title:document.getElementById('title').value.trim(),
+    level:document.getElementById('level').value,
+    grade:document.getElementById('grade').value,
+    subject:document.getElementById('subject').value.trim(),
+    teacher:document.getElementById('teacher').value.trim(),
+    school_year:document.getElementById('schoolYear').value.trim(),
+    tags:document.getElementById('tags').value.trim(),
+    description:document.getElementById('description').value.trim(),
+    cover_url:document.getElementById('coverUrl').value.trim(),
+    lesson_url:document.getElementById('lessonUrl').value.trim()
+  };
+}
+async function checkAdmin(){
+  if(!supabaseClient || !currentUser) return false;
+  const {data,error}=await supabaseClient.rpc('is_admin');
+  if(error){ console.error('is_admin:',error); return false; }
+  return data===true;
+}
+async function applySession(session){
+  currentUser=session?.user||null;
+  isAdmin=currentUser ? await checkAdmin() : false;
+  updateAuthUI();
 }
 function updateAuthUI(){
-  const addBtn = document.getElementById('openAdd');
-  const loginBtn = document.getElementById('adminLoginBtn');
-  const logoutBtn = document.getElementById('adminLogoutBtn');
-  const adminNav = document.getElementById('adminNavBtn');
-
-  addBtn?.classList.toggle('hidden', !isAdmin);
-  loginBtn?.classList.toggle('hidden', isAdmin);
-  logoutBtn?.classList.toggle('hidden', !isAdmin);
-  adminNav?.classList.toggle('hidden', !isAdmin);
-
-  const heroAdd = document.getElementById('heroAdd');
-  if(heroAdd){
-    heroAdd.textContent = isAdmin ? 'Đăng bài mới' : 'Đăng nhập để đăng bài';
-  }
+  const addBtn=document.getElementById('openAdd');
+  const loginBtn=document.getElementById('adminLoginBtn');
+  const logoutBtn=document.getElementById('adminLogoutBtn');
+  const adminNav=document.getElementById('adminNavBtn');
+  addBtn?.classList.toggle('hidden',!isAdmin);
+  loginBtn?.classList.toggle('hidden',isAdmin);
+  logoutBtn?.classList.toggle('hidden',!isAdmin);
+  adminNav?.classList.toggle('hidden',!isAdmin);
 }
 function requireAdmin(){
+  if(!SUPABASE_CONFIGURED){
+    showToast('Chưa cấu hình Supabase');
+    document.getElementById('setupWarning')?.classList.remove('hidden');
+    return false;
+  }
   if(isAdmin) return true;
   document.getElementById('loginModal').classList.remove('hidden');
   showToast('Vui lòng đăng nhập quản trị');
   return false;
 }
-
-
-const demo = [
-  {
-    id:'demo-1',
-    title:'Bài học số mẫu: Cơ sở dữ liệu',
-    level:'THPT', grade:'11', subject:'Tin học', teacher:'Giáo viên Tin học',
-    schoolYear:'2026-2027', tags:'CSDL, Tin học',
-    description:'Bài học số minh họa cách hệ thống hiển thị học liệu, liên kết và tài liệu đính kèm.',
-    coverUrl:'https://images.unsplash.com/photo-1516321318423-f06f85e504b3?auto=format&fit=crop&w=900&q=80',
-    lessonUrl:'https://www.youtube.com/',
-    files:[], views:12, downloads:2, createdAt:Date.now()-86400000
-  },
-  {
-    id:'demo-2',
-    title:'Chủ đề STEM: Năng lượng và đời sống',
-    level:'THCS', grade:'9', subject:'Khoa học tự nhiên', teacher:'Giáo viên KHTN',
-    schoolYear:'2026-2027', tags:'STEM, Năng lượng',
-    description:'Sản phẩm số tích hợp video, tài liệu và hoạt động trải nghiệm theo chủ đề.',
-    coverUrl:'https://images.unsplash.com/photo-1509391366360-2e959784a276?auto=format&fit=crop&w=900&q=80',
-    lessonUrl:'', files:[], views:8, downloads:1, createdAt:Date.now()-172800000
+async function loadLessons(){
+  if(!supabaseClient){ lessons=[]; renderAll(); return; }
+  const {data,error}=await supabaseClient
+    .from('lessons')
+    .select('*, lesson_files(*)')
+    .order('created_at',{ascending:false});
+  if(error){
+    console.error(error);
+    lessons=[];
+    renderAll();
+    showToast('Không tải được dữ liệu Supabase');
+    return;
   }
-];
-if(!lessons.length){
-  lessons = demo;
-  saveLessons();
+  lessons=(data||[]).map(fromDbLesson);
+  renderAll();
 }
 
-function openDB(){
-  return new Promise((resolve,reject)=>{
-    const req=indexedDB.open(DB_NAME,DB_VERSION);
-    req.onupgradeneeded=e=>{
-      const d=e.target.result;
-      if(!d.objectStoreNames.contains(STORE)) d.createObjectStore(STORE,{keyPath:'id'});
-    };
-    req.onsuccess=e=>{db=e.target.result;resolve(db)};
-    req.onerror=e=>reject(e);
-  });
-}
-function putBlob(rec){
-  return new Promise((resolve,reject)=>{
-    const tx=db.transaction(STORE,'readwrite');
-    tx.objectStore(STORE).put(rec);
-    tx.oncomplete=()=>resolve();
-    tx.onerror=e=>reject(e);
-  })
-}
-function getBlob(id){
-  return new Promise((resolve,reject)=>{
-    const tx=db.transaction(STORE,'readonly');
-    const r=tx.objectStore(STORE).get(id);
-    r.onsuccess=()=>resolve(r.result);
-    r.onerror=e=>reject(e);
-  })
-}
-function deleteBlob(id){
-  return new Promise((resolve,reject)=>{
-    const tx=db.transaction(STORE,'readwrite');
-    tx.objectStore(STORE).delete(id);
-    tx.oncomplete=()=>resolve();
-    tx.onerror=e=>reject(e);
-  })
-}
-function saveLessons(){ localStorage.setItem('maiSonLessons',JSON.stringify(lessons)); }
-function uid(){ return (crypto.randomUUID ? crypto.randomUUID() : 'id-'+Date.now()+'-'+Math.random().toString(16).slice(2)); }
-function escapeHtml(s=''){ return s.replace(/[&<>"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[m])); }
-function showToast(msg){
-  const t=document.getElementById('toast'); t.textContent=msg; t.classList.add('show'); setTimeout(()=>t.classList.remove('show'),2200);
-}
-function fmt(n){return new Intl.NumberFormat('vi-VN').format(n||0)}
-function closeModal(id){document.getElementById(id).classList.add('hidden')}
 function openAddModal(){
   if(!requireAdmin()) return;
   document.getElementById('formTitle').textContent='Đăng bài học số mới';
@@ -1011,14 +1040,8 @@ function openAddModal(){
   updateGradeOptions();
   document.getElementById('addModal').classList.remove('hidden');
 }
-const openAddButton = document.getElementById('openAdd');
-if(openAddButton){
-  openAddButton.onclick=()=>{ if(requireAdmin()) openAddModal(); };
-}
-const heroAddButton = document.getElementById('heroAdd');
-if(heroAddButton){
-  heroAddButton.onclick=()=>{ if(requireAdmin()) openAddModal(); };
-}
+const openAddButton=document.getElementById('openAdd');
+if(openAddButton) openAddButton.onclick=()=>{ if(requireAdmin()) openAddModal(); };
 
 function updateGradeOptions(){
   const level=document.getElementById('level').value;
@@ -1029,44 +1052,61 @@ function updateGradeOptions(){
   if(items.includes(current)) grade.value=current;
 }
 document.getElementById('level').addEventListener('change',updateGradeOptions);
-
 document.getElementById('files').addEventListener('change',e=>{
   document.getElementById('selectedFiles').innerHTML=[...e.target.files].map(f=>`
     <div class="file-row"><span>📎 ${escapeHtml(f.name)}</span><small>${(f.size/1024/1024).toFixed(2)} MB</small></div>`).join('');
 });
 
-document.getElementById('lessonForm').addEventListener('submit', async e=>{
+document.getElementById('lessonForm').addEventListener('submit',async e=>{
   e.preventDefault();
   if(!requireAdmin()) return;
-  const id=document.getElementById('editId').value || uid();
-  const old=lessons.find(x=>x.id===id);
-  const newFileInput=[...document.getElementById('files').files];
-  let fileMeta = old?.files ? [...old.files] : [];
+  const submitBtn=e.submitter;
+  if(submitBtn) submitBtn.disabled=true;
+  const editId=document.getElementById('editId').value;
+  const newFiles=[...document.getElementById('files').files];
+  const payload=formPayload();
+  let lessonId=editId;
+  let createdNew=false;
+  const uploadedPaths=[];
+  try{
+    if(editId){
+      const {error}=await supabaseClient.from('lessons').update({...payload,updated_at:new Date().toISOString()}).eq('id',editId);
+      if(error) throw error;
+    }else{
+      const {data,error}=await supabaseClient.from('lessons').insert({...payload,created_by:currentUser.id}).select('id').single();
+      if(error) throw error;
+      lessonId=data.id;
+      createdNew=true;
+    }
 
-  for(const file of newFileInput){
-    const fileId=uid();
-    await putBlob({id:fileId, blob:file, name:file.name, type:file.type, size:file.size});
-    fileMeta.push({id:fileId,name:file.name,type:file.type,size:file.size});
+    for(const file of newFiles){
+      const path=`${lessonId}/${uid()}-${safeFileName(file.name)}`;
+      const {error:uploadError}=await supabaseClient.storage.from(STORAGE_BUCKET).upload(path,file,{
+        cacheControl:'3600',upsert:false,contentType:file.type||undefined
+      });
+      if(uploadError) throw uploadError;
+      uploadedPaths.push(path);
+      const {error:fileRowError}=await supabaseClient.from('lesson_files').insert({
+        lesson_id:lessonId,
+        name:file.name,
+        storage_path:path,
+        mime_type:file.type||'',
+        size_bytes:file.size||0
+      });
+      if(fileRowError) throw fileRowError;
+    }
+
+    closeModal('addModal');
+    await loadLessons();
+    showToast(editId?'Đã cập nhật bài học':'Đã đăng bài học mới');
+  }catch(err){
+    console.error(err);
+    try{ if(uploadedPaths.length) await supabaseClient.storage.from(STORAGE_BUCKET).remove(uploadedPaths); }catch(_e){}
+    try{ if(createdNew && lessonId) await supabaseClient.from('lessons').delete().eq('id',lessonId); }catch(_e){}
+    showToast('Không lưu được bài học: '+(err.message||'Lỗi Supabase'));
+  }finally{
+    if(submitBtn) submitBtn.disabled=false;
   }
-
-  const data={
-    id,
-    title:document.getElementById('title').value.trim(),
-    level:document.getElementById('level').value,
-    grade:document.getElementById('grade').value,
-    subject:document.getElementById('subject').value.trim(),
-    teacher:document.getElementById('teacher').value.trim(),
-    schoolYear:document.getElementById('schoolYear').value.trim(),
-    tags:document.getElementById('tags').value.trim(),
-    description:document.getElementById('description').value.trim(),
-    coverUrl:document.getElementById('coverUrl').value.trim(),
-    lessonUrl:document.getElementById('lessonUrl').value.trim(),
-    files:fileMeta,
-    views:old?.views||0, downloads:old?.downloads||0,
-    createdAt:old?.createdAt||Date.now()
-  };
-  if(old) lessons=lessons.map(x=>x.id===id?data:x); else lessons.unshift(data);
-  saveLessons(); closeModal('addModal'); renderAll(); showToast(old?'Đã cập nhật bài học':'Đã đăng bài học mới');
 });
 
 function buildFilterOptions(){
@@ -1078,14 +1118,14 @@ function buildFilterOptions(){
   fill('fGrade','Tất cả khối',grades);
 }
 function fill(id,label,arr){
-  const el=document.getElementById(id), v=el.value;
+  const el=document.getElementById(id),v=el.value;
   el.innerHTML=`<option value="">${label}</option>`+arr.map(x=>`<option>${escapeHtml(x)}</option>`).join('');
   if(arr.includes(v)) el.value=v;
 }
 function filtered(){
   const q=document.getElementById('search').value.toLowerCase().trim();
-  const level=document.getElementById('fLevel').value, grade=document.getElementById('fGrade').value,
-    subject=document.getElementById('fSubject').value, teacher=document.getElementById('fTeacher').value;
+  const level=document.getElementById('fLevel').value,grade=document.getElementById('fGrade').value,
+    subject=document.getElementById('fSubject').value,teacher=document.getElementById('fTeacher').value;
   return lessons.filter(x=>{
     const hay=(x.title+' '+x.teacher+' '+x.subject+' '+x.tags+' '+x.description).toLowerCase();
     return (!q||hay.includes(q))&&(!level||x.level===level)&&(!grade||x.grade===grade)&&(!subject||x.subject===subject)&&(!teacher||x.teacher===teacher);
@@ -1109,13 +1149,13 @@ function lessonCard(x){
 }
 function renderLessons(){
   const arr=filtered();
-  document.getElementById('lessonGrid').innerHTML=arr.length?arr.map(lessonCard).join(''):`<div class="empty">Chưa tìm thấy bài học phù hợp.</div>`;
+  document.getElementById('lessonGrid').innerHTML=arr.length?arr.map(lessonCard).join(''):`<div class="empty">Chưa có bài học hoặc chưa tìm thấy bài học phù hợp.</div>`;
 }
 ['search','fLevel','fGrade','fSubject','fTeacher'].forEach(id=>document.getElementById(id).addEventListener('input',renderLessons));
 function resetFilters(){
-  ['search','fLevel','fGrade','fSubject','fTeacher'].forEach(id=>document.getElementById(id).value=''); renderLessons();
+  ['search','fLevel','fGrade','fSubject','fTeacher'].forEach(id=>document.getElementById(id).value='');
+  renderLessons();
 }
-
 function renderStats(){
   document.getElementById('statLessons').textContent=fmt(lessons.length);
   document.getElementById('statTeachers').textContent=fmt(new Set(lessons.map(x=>x.teacher)).size);
@@ -1124,7 +1164,10 @@ function renderStats(){
 }
 function renderTeachers(){
   const map={};
-  lessons.forEach(x=>{ if(!map[x.teacher])map[x.teacher]={name:x.teacher,count:0,subjects:new Set(),views:0}; map[x.teacher].count++;map[x.teacher].subjects.add(x.subject);map[x.teacher].views+=x.views||0;});
+  lessons.forEach(x=>{
+    if(!map[x.teacher]) map[x.teacher]={name:x.teacher,count:0,subjects:new Set(),views:0};
+    map[x.teacher].count++; map[x.teacher].subjects.add(x.subject); map[x.teacher].views+=x.views||0;
+  });
   const arr=Object.values(map);
   document.getElementById('teacherGrid').innerHTML=arr.length?arr.map(t=>`
     <div class="lesson"><div class="lesson-body">
@@ -1138,7 +1181,6 @@ function renderTeachers(){
 function filterTeacher(name){
   switchView('library'); document.getElementById('fTeacher').value=name; renderLessons();
 }
-
 function renderAdmin(){
   document.getElementById('adminBody').innerHTML=lessons.map(x=>`
     <tr>
@@ -1152,22 +1194,33 @@ function renderAdmin(){
 }
 function editLesson(id){
   if(!requireAdmin()) return;
-  const x=lessons.find(y=>y.id===id); if(!x)return;
+  const x=lessons.find(y=>y.id===id); if(!x) return;
   document.getElementById('formTitle').textContent='Chỉnh sửa bài học';
   document.getElementById('editId').value=x.id;
-  ['title','level','subject','teacher','schoolYear','tags','description','coverUrl','lessonUrl'].forEach(k=>document.getElementById(k).value=x[k]||'');
+  const values={title:x.title,level:x.level,subject:x.subject,teacher:x.teacher,schoolYear:x.schoolYear,tags:x.tags,description:x.description,coverUrl:x.coverUrl,lessonUrl:x.lessonUrl};
+  Object.entries(values).forEach(([k,v])=>document.getElementById(k).value=v||'');
   updateGradeOptions(); document.getElementById('grade').value=x.grade;
-  document.getElementById('selectedFiles').innerHTML=(x.files||[]).map(f=>`<div class="file-row"><span>📎 ${escapeHtml(f.name)}</span><small>Đã lưu</small></div>`).join('');
+  document.getElementById('selectedFiles').innerHTML=(x.files||[]).map(f=>`<div class="file-row"><span>📎 ${escapeHtml(f.name)}</span><small>Đã lưu trên Supabase</small></div>`).join('');
   document.getElementById('addModal').classList.remove('hidden');
 }
 async function removeLesson(id){
   if(!requireAdmin()) return;
-  if(!confirm('Xóa bài học này?')) return;
+  if(!confirm('Xóa bài học này và toàn bộ tệp đính kèm?')) return;
   const x=lessons.find(y=>y.id===id);
-  for(const f of (x?.files||[])) await deleteBlob(f.id);
-  lessons=lessons.filter(y=>y.id!==id); saveLessons(); renderAll(); showToast('Đã xóa bài học');
+  try{
+    const paths=(x?.files||[]).map(f=>f.path).filter(Boolean);
+    if(paths.length){
+      const {error}=await supabaseClient.storage.from(STORAGE_BUCKET).remove(paths);
+      if(error) throw error;
+    }
+    const {error}=await supabaseClient.from('lessons').delete().eq('id',id);
+    if(error) throw error;
+    await loadLessons();
+    showToast('Đã xóa bài học');
+  }catch(err){
+    console.error(err); showToast('Không xóa được: '+(err.message||'Lỗi Supabase'));
+  }
 }
-
 function normalizeEmbed(url){
   try{
     if(url.includes('youtube.com/watch?v=')){
@@ -1178,8 +1231,10 @@ function normalizeEmbed(url){
   }catch(e){return url}
 }
 async function openViewer(id){
-  const x=lessons.find(y=>y.id===id); if(!x)return;
-  x.views=(x.views||0)+1; saveLessons(); renderStats(); renderLessons(); renderAdmin();
+  const x=lessons.find(y=>y.id===id); if(!x) return;
+  x.views=(x.views||0)+1;
+  renderStats(); renderLessons(); renderAdmin();
+  if(supabaseClient) supabaseClient.rpc('increment_lesson_views',{p_lesson_id:id}).then(({error})=>{if(error)console.warn(error)});
   document.getElementById('viewTitle').textContent=x.title;
   document.getElementById('viewMeta').innerHTML=`
     <div class="meta"><span class="chip">${escapeHtml(x.level)}</span><span class="chip">Khối ${escapeHtml(x.grade)}</span><span class="chip">${escapeHtml(x.subject)}</span></div>
@@ -1188,11 +1243,14 @@ async function openViewer(id){
     <div class="note" style="margin-top:8px">👁 ${fmt(x.views)} lượt xem • ⬇️ ${fmt(x.downloads||0)} lượt tải</div>`;
   const tabs=[];
   if(x.lessonUrl) tabs.push({kind:'url',label:'🌐 Bài học trực tuyến',url:x.lessonUrl});
-  (x.files||[]).forEach((f,i)=>tabs.push({kind:'file',label:'📎 '+f.name,file:f}));
+  (x.files||[]).forEach(f=>tabs.push({kind:'file',label:'📎 '+f.name,file:f}));
   document.getElementById('viewerTabs').innerHTML=tabs.length?tabs.map((t,i)=>`<button class="tab ${i===0?'active':''}" data-i="${i}">${escapeHtml(t.label)}</button>`).join(''):'<span class="note">Bài này chưa có file hoặc liên kết.</span>';
-  document.querySelectorAll('#viewerTabs .tab').forEach((b,i)=>b.onclick=()=>{document.querySelectorAll('#viewerTabs .tab').forEach(z=>z.classList.remove('active'));b.classList.add('active');showTab(tabs[i])});
+  document.querySelectorAll('#viewerTabs .tab').forEach((b,i)=>b.onclick=()=>{
+    document.querySelectorAll('#viewerTabs .tab').forEach(z=>z.classList.remove('active'));
+    b.classList.add('active'); showTab(tabs[i]);
+  });
   document.getElementById('downloadList').innerHTML=(x.files||[]).length?`<b style="font-size:13px">Tài liệu tải xuống</b>`+(x.files||[]).map(f=>`<div style="margin-top:8px"><button class="btn btn-soft" style="width:100%;justify-content:flex-start" onclick="downloadFile('${x.id}','${f.id}')">⬇️ ${escapeHtml(f.name)}</button></div>`).join(''):'';
-  if(tabs[0]) showTab(tabs[0]); else document.getElementById('viewerFrame').innerHTML='<div class="note">Chưa có nội dung để xem.</div>';
+  if(tabs[0]) await showTab(tabs[0]); else document.getElementById('viewerFrame').innerHTML='<div class="note">Chưa có nội dung để xem.</div>';
   document.getElementById('viewModal').classList.remove('hidden');
 }
 async function showTab(t){
@@ -1201,24 +1259,51 @@ async function showTab(t){
     frame.innerHTML=`<iframe src="${escapeHtml(normalizeEmbed(t.url))}" allow="fullscreen; autoplay"></iframe>`;
     return;
   }
-  const rec=await getBlob(t.file.id);
-  if(!rec){frame.innerHTML='<div class="note">Không tìm thấy tệp trên trình duyệt này.</div>';return}
-  const url=URL.createObjectURL(rec.blob), type=(rec.type||'').toLowerCase(), name=rec.name.toLowerCase();
-  if(type.startsWith('image/')) frame.innerHTML=`<img src="${url}">`;
-  else if(type.startsWith('video/')) frame.innerHTML=`<video src="${url}" controls></video>`;
-  else if(type==='application/pdf'||name.endsWith('.pdf')) frame.innerHTML=`<iframe src="${url}"></iframe>`;
-  else if(name.endsWith('.html')||name.endsWith('.htm')) frame.innerHTML=`<iframe src="${url}"></iframe>`;
-  else frame.innerHTML=`<div style="text-align:center;padding:25px"><div style="font-size:50px">📄</div><p>Trình duyệt không xem trực tiếp định dạng này.</p><button class="btn btn-primary" onclick="downloadFile(null,'${t.file.id}')">Tải tệp</button></div>`;
+  const type=(t.file.type||'').toLowerCase();
+  const name=(t.file.name||'').toLowerCase();
+  const url=t.file.url||publicFileUrl(t.file.path);
+  if(type.startsWith('image/')) frame.innerHTML=`<img src="${escapeHtml(url)}">`;
+  else if(type.startsWith('video/')) frame.innerHTML=`<video src="${escapeHtml(url)}" controls></video>`;
+  else if(type==='application/pdf'||name.endsWith('.pdf')) frame.innerHTML=`<iframe src="${escapeHtml(url)}"></iframe>`;
+  else if(name.endsWith('.html')||name.endsWith('.htm')){
+    frame.innerHTML='<div class="note">Đang tải bài học HTML...</div>';
+    try{
+      const res=await fetch(url,{cache:'no-store'});
+      if(!res.ok) throw new Error('HTTP '+res.status);
+      let htmlText=await res.text();
+      const baseHref=url.slice(0,url.lastIndexOf('/')+1);
+      const baseTag=`<base href="${escapeHtml(baseHref)}">`;
+      if(/<head[^>]*>/i.test(htmlText)) htmlText=htmlText.replace(/<head([^>]*)>/i,`<head$1>${baseTag}`);
+      else htmlText=baseTag+htmlText;
+      const blobUrl=URL.createObjectURL(new Blob([htmlText],{type:'text/html'}));
+      frame.innerHTML=`<iframe src="${blobUrl}" sandbox="allow-scripts allow-forms allow-modals allow-popups allow-downloads allow-same-origin"></iframe>`;
+    }catch(err){
+      console.error(err);
+      frame.innerHTML='<div class="note">Không mở được bài học HTML. Hãy tải tệp xuống để kiểm tra.</div>';
+    }
+  }else{
+    frame.innerHTML=`<div style="text-align:center;padding:25px"><div style="font-size:50px">📄</div><p>Trình duyệt không xem trực tiếp định dạng này.</p><button class="btn btn-primary" onclick="downloadFile(null,'${t.file.id}')">Tải tệp</button></div>`;
+  }
 }
 async function downloadFile(lessonId,fileId){
-  const rec=await getBlob(fileId); if(!rec){showToast('Không tìm thấy tệp');return}
-  const a=document.createElement('a');a.href=URL.createObjectURL(rec.blob);a.download=rec.name;document.body.appendChild(a);a.click();a.remove();
-  if(lessonId){const x=lessons.find(y=>y.id===lessonId);if(x){x.downloads=(x.downloads||0)+1;saveLessons();renderStats();}}
+  const lesson=lessonId?lessons.find(x=>x.id===lessonId):lessons.find(x=>(x.files||[]).some(f=>f.id===fileId));
+  const file=lesson?.files?.find(f=>f.id===fileId);
+  if(!file){showToast('Không tìm thấy tệp');return}
+  const a=document.createElement('a');
+  a.href=publicFileUrl(file.path,true);
+  a.target='_blank'; a.rel='noopener';
+  document.body.appendChild(a); a.click(); a.remove();
+  if(lesson){
+    lesson.downloads=(lesson.downloads||0)+1; renderStats(); renderLessons(); renderAdmin();
+    if(supabaseClient) supabaseClient.rpc('increment_lesson_downloads',{p_lesson_id:lesson.id}).then(({error})=>{if(error)console.warn(error)});
+  }
 }
-function closeViewer(){document.getElementById('viewModal').classList.add('hidden');document.getElementById('viewerFrame').innerHTML='';}
-
+function closeViewer(){
+  document.getElementById('viewModal').classList.add('hidden');
+  document.getElementById('viewerFrame').innerHTML='';
+}
 function switchView(view){
-  if(view==='admin' && !requireAdmin()) return;
+  if(view==='admin'&&!requireAdmin()) return;
   document.querySelectorAll('.nav button').forEach(b=>b.classList.toggle('active',b.dataset.view===view));
   document.getElementById('homeView').classList.toggle('hidden',view!=='home');
   document.getElementById('libraryView').classList.toggle('hidden',view==='teachers'||view==='admin');
@@ -1232,73 +1317,67 @@ document.querySelectorAll('.nav button').forEach(b=>b.onclick=()=>switchView(b.d
 document.getElementById('exportData').onclick=()=>{
   if(!requireAdmin()) return;
   const blob=new Blob([JSON.stringify(lessons,null,2)],{type:'application/json'});
-  const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download='kho-bai-hoc-so-data.json';a.click();
+  const a=document.createElement('a'); a.href=URL.createObjectURL(blob); a.download='kho-bai-hoc-so-data.json'; a.click();
 };
 
-
 document.getElementById('adminLoginBtn').onclick=()=>{
+  if(!SUPABASE_CONFIGURED){document.getElementById('setupWarning')?.classList.remove('hidden');showToast('Chưa cấu hình Supabase');return}
   document.getElementById('adminPassword').value='';
   document.getElementById('loginModal').classList.remove('hidden');
 };
-
-document.getElementById('adminLogoutBtn').onclick=()=>{
-  isAdmin=false;
-  sessionStorage.removeItem('maiSonAdminSession');
-  updateAuthUI();
-  switchView('home');
-  showToast('Đã đăng xuất quản trị');
+document.getElementById('adminLogoutBtn').onclick=async()=>{
+  if(supabaseClient) await supabaseClient.auth.signOut();
+  currentUser=null; isAdmin=false; updateAuthUI(); switchView('home'); showToast('Đã đăng xuất quản trị');
 };
-
-document.getElementById('loginForm').addEventListener('submit', e=>{
+document.getElementById('loginForm').addEventListener('submit',async e=>{
   e.preventDefault();
-  const account=getAdminAccount();
-  const username=document.getElementById('adminUsername').value.trim();
+  if(!supabaseClient) return;
+  const email=document.getElementById('adminUsername').value.trim();
   const password=document.getElementById('adminPassword').value;
-  if(username===account.username && password===account.password){
-    isAdmin=true;
-    sessionStorage.setItem('maiSonAdminSession','1');
-    closeModal('loginModal');
-    updateAuthUI();
-    showToast('Đăng nhập quản trị thành công');
-  }else{
-    showToast('Sai tên đăng nhập hoặc mật khẩu');
-  }
+  const {data,error}=await supabaseClient.auth.signInWithPassword({email,password});
+  if(error){showToast('Đăng nhập không thành công');return}
+  currentUser=data.user;
+  isAdmin=await checkAdmin();
+  if(!isAdmin){await supabaseClient.auth.signOut();currentUser=null;showToast('Tài khoản chưa được cấp quyền quản trị');return}
+  closeModal('loginModal'); updateAuthUI(); showToast('Đăng nhập quản trị thành công');
 });
-
 document.getElementById('changePasswordBtn').onclick=()=>{
   if(!requireAdmin()) return;
   document.getElementById('passwordForm').reset();
   document.getElementById('passwordModal').classList.remove('hidden');
 };
-
-document.getElementById('passwordForm').addEventListener('submit', e=>{
+document.getElementById('passwordForm').addEventListener('submit',async e=>{
   e.preventDefault();
-  if(!requireAdmin()) return;
-  const account=getAdminAccount();
+  if(!requireAdmin()||!currentUser?.email) return;
   const current=document.getElementById('currentPassword').value;
   const next=document.getElementById('newPassword').value;
   const confirm=document.getElementById('confirmPassword').value;
-  if(current!==account.password){
-    showToast('Mật khẩu hiện tại không đúng');
-    return;
-  }
-  if(next.length<6){
-    showToast('Mật khẩu mới phải có ít nhất 6 ký tự');
-    return;
-  }
-  if(next!==confirm){
-    showToast('Mật khẩu nhập lại chưa khớp');
-    return;
-  }
-  saveAdminAccount({username:account.username,password:next});
-  closeModal('passwordModal');
-  showToast('Đã đổi mật khẩu quản trị');
+  if(next.length<6){showToast('Mật khẩu mới phải có ít nhất 6 ký tự');return}
+  if(next!==confirm){showToast('Mật khẩu nhập lại chưa khớp');return}
+  const verify=await supabaseClient.auth.signInWithPassword({email:currentUser.email,password:current});
+  if(verify.error){showToast('Mật khẩu hiện tại không đúng');return}
+  const {error}=await supabaseClient.auth.updateUser({password:next});
+  if(error){showToast('Không đổi được mật khẩu');return}
+  closeModal('passwordModal'); showToast('Đã đổi mật khẩu quản trị');
 });
 
 function renderAll(){
   buildFilterOptions(); renderLessons(); renderStats(); renderTeachers(); renderAdmin(); updateAuthUI();
 }
-openDB().then(()=>renderAll()).catch(()=>{renderAll();showToast('Trình duyệt hạn chế lưu file; dữ liệu văn bản vẫn hoạt động.')});
+async function initApp(){
+  if(!SUPABASE_CONFIGURED||!supabaseClient){
+    document.getElementById('setupWarning')?.classList.remove('hidden');
+    lessons=[]; renderAll(); return;
+  }
+  document.getElementById('setupWarning')?.classList.add('hidden');
+  const {data:{session}}=await supabaseClient.auth.getSession();
+  await applySession(session);
+  supabaseClient.auth.onAuthStateChange((_event,newSession)=>{
+    setTimeout(()=>applySession(newSession),0);
+  });
+  await loadLessons();
+}
+initApp().catch(err=>{console.error(err);showToast('Lỗi khởi tạo Supabase');renderAll();});
 </script>
 </body>
 </html>
