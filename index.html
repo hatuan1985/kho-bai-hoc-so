@@ -3,7 +3,9 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="referrer" content="strict-origin-when-cross-origin">
   <title>Kho bài học số - Trường PTDTNT THCS-THPT Mai Sơn</title>
+  <!-- YouTube Error 153 fix v2 - 2026-08-25 -->
   <link rel="icon" href="favicon.svg" type="image/svg+xml">
   <meta name="description" content="Kho bài học số - Trường PTDTNT THCS-THPT Mai Sơn" />
   <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -1237,7 +1239,7 @@ function normalizeEmbed(url){
     if(host==='youtube.com'||host==='m.youtube.com'||host==='music.youtube.com'){
       if(u.pathname==='/watch') id=u.searchParams.get('v')||'';
       else if(u.pathname.startsWith('/shorts/')) id=u.pathname.split('/')[2]||'';
-      else if(u.pathname.startsWith('/embed/')) return u.href;
+      else if(u.pathname.startsWith('/embed/')) id=u.pathname.split('/')[2]||'';
     }else if(host==='youtu.be'){
       id=u.pathname.replace(/^\//,'').split('/')[0]||'';
     }
@@ -1246,8 +1248,56 @@ function normalizeEmbed(url){
     const start=u.searchParams.get('start')||youtubeTimeToSeconds(u.searchParams.get('t'));
     if(start) embed.searchParams.set('start',start);
     embed.searchParams.set('rel','0');
+    // YouTube Error 153: cung cap them danh tinh trang nhung.
+    embed.searchParams.set('origin',window.location.origin);
+    embed.searchParams.set('widget_referrer',window.location.href);
     return embed.toString();
   }catch(e){return url}
+}
+function prepareHtmlForViewer(htmlText,sourceUrl){
+  const origin=window.location.origin;
+  const pageUrl=window.location.href;
+  const baseHref=sourceUrl.slice(0,sourceUrl.lastIndexOf('/')+1);
+
+  // Buoc 1: dam bao tai lieu co base URL va Referrer-Policy ro rang.
+  const headBits=`<base href="${escapeHtml(baseHref)}"><meta name="referrer" content="strict-origin-when-cross-origin">`;
+  if(/<head[^>]*>/i.test(htmlText)) htmlText=htmlText.replace(/<head([^>]*)>/i,`<head$1>${headBits}`);
+  else htmlText=headBits+htmlText;
+
+  // Buoc 2: bo meta referrer no-referrer neu bai hoc cu co chen vao.
+  htmlText=htmlText.replace(/<meta\s+[^>]*name=["']referrer["'][^>]*content=["'](?:no-referrer|same-origin)["'][^>]*>/gi,'');
+
+  // Buoc 3: chuan hoa URL YouTube embed va them origin/widget_referrer.
+  htmlText=htmlText.replace(/https:\/\/(?:www\.)?youtube(?:-nocookie)?\.com\/embed\/([A-Za-z0-9_-]{6,})([^"'\s<]*)/gi,(m,id,q='')=>{
+    try{
+      const u=new URL(`https://www.youtube.com/embed/${id}${q||''}`);
+      u.searchParams.set('origin',origin);
+      u.searchParams.set('widget_referrer',pageUrl);
+      if(!u.searchParams.has('rel')) u.searchParams.set('rel','0');
+      return u.toString();
+    }catch(_e){return m}
+  });
+
+  // Buoc 4: ep referrerpolicy cho cac iframe YouTube neu chua co.
+  htmlText=htmlText.replace(/<iframe\b([^>]*youtube(?:-nocookie)?\.com\/embed\/[^>]*)>/gi,(m,attrs)=>{
+    let a=attrs.replace(/\sreferrerpolicy=["'][^"']*["']/i,'');
+    if(!/\sallow=/i.test(a)) a+=' allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"';
+    if(!/\sallowfullscreen\b/i.test(a)) a+=' allowfullscreen';
+    return `<iframe${a} referrerpolicy="strict-origin-when-cross-origin">`;
+  });
+
+  // Buoc 5: them nut du phong mo YouTube o tab moi neu bai hoc co video YouTube.
+  const hit=htmlText.match(/youtube(?:-nocookie)?\.com\/embed\/([A-Za-z0-9_-]{6,})[^"'\s<]*/i);
+  if(hit){
+    const id=hit[1];
+    let start='';
+    const startHit=hit[0].match(/[?&]start=(\d+)/i);
+    if(startHit) start=`&t=${startHit[1]}s`;
+    const fallback=`<a href="https://www.youtube.com/watch?v=${id}${start}" target="_blank" rel="noopener" style="position:fixed;right:18px;top:18px;z-index:2147483647;background:#ff0033;color:#fff;padding:10px 14px;border-radius:10px;text-decoration:none;font:700 14px Arial,sans-serif;box-shadow:0 4px 18px rgba(0,0,0,.22)">▶ Mở trên YouTube</a>`;
+    if(/<body[^>]*>/i.test(htmlText)) htmlText=htmlText.replace(/<body([^>]*)>/i,`<body$1>${fallback}`);
+    else htmlText=fallback+htmlText;
+  }
+  return htmlText;
 }
 async function openViewer(id){
   const x=lessons.find(y=>y.id===id); if(!x) return;
@@ -1290,15 +1340,28 @@ async function showTab(t){
   else if(type.startsWith('video/')) frame.innerHTML=`<video src="${escapeHtml(url)}" controls></video>`;
   else if(type==='application/pdf'||name.endsWith('.pdf')) frame.innerHTML=`<iframe src="${escapeHtml(url)}"></iframe>`;
   else if(name.endsWith('.html')||name.endsWith('.htm')){
-    // Mở trực tiếp URL HTTPS của tệp HTML trên Supabase.
-    // Không chuyển thành blob: vì blob làm mất nguồn/referrer cần thiết cho YouTube Embed (lỗi 153).
-    frame.innerHTML=`<iframe
-      src="${escapeHtml(url)}"
-      title="${escapeHtml(t.file.name||'Bài học HTML')}"
-      referrerpolicy="strict-origin-when-cross-origin"
-      sandbox="allow-scripts allow-forms allow-modals allow-popups allow-popups-to-escape-sandbox allow-downloads allow-same-origin"
-      allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share; fullscreen"
-      allowfullscreen></iframe>`;
+    // Quan trong: khong mo HTML bang blob: hoac URL Supabase truc tiep.
+    // Doc noi dung HTML va dua vao srcdoc de trang bai hoc co nguon tu GitHub Pages,
+    // giup YouTube nhan HTTP Referer hop le (khac phuc Error 153).
+    frame.innerHTML='<div class="note">Đang tải bài học HTML...</div>';
+    try{
+      const res=await fetch(url,{cache:'no-store'});
+      if(!res.ok) throw new Error('HTTP '+res.status);
+      const raw=await res.text();
+      const prepared=prepareHtmlForViewer(raw,url);
+      const iframe=document.createElement('iframe');
+      iframe.title=t.file.name||'Bài học HTML';
+      iframe.referrerPolicy='strict-origin-when-cross-origin';
+      iframe.setAttribute('sandbox','allow-scripts allow-forms allow-modals allow-popups allow-popups-to-escape-sandbox allow-downloads allow-same-origin');
+      iframe.setAttribute('allow','accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share; fullscreen');
+      iframe.setAttribute('allowfullscreen','');
+      iframe.srcdoc=prepared;
+      frame.innerHTML='';
+      frame.appendChild(iframe);
+    }catch(err){
+      console.error(err);
+      frame.innerHTML=`<div style="text-align:center;padding:30px"><div style="font-size:46px">⚠️</div><p>Không mở được bài học HTML trong trình xem.</p><a class="btn btn-primary" href="${escapeHtml(url)}" target="_blank" rel="noopener">Mở bài học ở tab mới</a></div>`;
+    }
   }else{
     frame.innerHTML=`<div style="text-align:center;padding:25px"><div style="font-size:50px">📄</div><p>Trình duyệt không xem trực tiếp định dạng này.</p><button class="btn btn-primary" onclick="downloadFile(null,'${t.file.id}')">Tải tệp</button></div>`;
   }
