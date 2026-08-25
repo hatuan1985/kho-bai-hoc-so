@@ -1221,13 +1221,32 @@ async function removeLesson(id){
     console.error(err); showToast('Không xóa được: '+(err.message||'Lỗi Supabase'));
   }
 }
+function youtubeTimeToSeconds(value=''){
+  const s=String(value||'').trim().toLowerCase();
+  if(!s) return '';
+  if(/^\d+$/.test(s)) return s;
+  const m=s.match(/^(?:(\d+)h)?(?:(\d+)m)?(?:(\d+)s)?$/);
+  if(!m) return '';
+  return String((Number(m[1]||0)*3600)+(Number(m[2]||0)*60)+Number(m[3]||0));
+}
 function normalizeEmbed(url){
   try{
-    if(url.includes('youtube.com/watch?v=')){
-      const id=new URL(url).searchParams.get('v'); return `https://www.youtube.com/embed/${id}`;
+    const u=new URL(url,window.location.href);
+    const host=u.hostname.replace(/^www\./,'').toLowerCase();
+    let id='';
+    if(host==='youtube.com'||host==='m.youtube.com'||host==='music.youtube.com'){
+      if(u.pathname==='/watch') id=u.searchParams.get('v')||'';
+      else if(u.pathname.startsWith('/shorts/')) id=u.pathname.split('/')[2]||'';
+      else if(u.pathname.startsWith('/embed/')) return u.href;
+    }else if(host==='youtu.be'){
+      id=u.pathname.replace(/^\//,'').split('/')[0]||'';
     }
-    if(url.includes('youtu.be/')) return `https://www.youtube.com/embed/${url.split('youtu.be/')[1].split(/[?&]/)[0]}`;
-    return url;
+    if(!id) return url;
+    const embed=new URL(`https://www.youtube.com/embed/${id}`);
+    const start=u.searchParams.get('start')||youtubeTimeToSeconds(u.searchParams.get('t'));
+    if(start) embed.searchParams.set('start',start);
+    embed.searchParams.set('rel','0');
+    return embed.toString();
   }catch(e){return url}
 }
 async function openViewer(id){
@@ -1256,7 +1275,12 @@ async function openViewer(id){
 async function showTab(t){
   const frame=document.getElementById('viewerFrame');
   if(t.kind==='url'){
-    frame.innerHTML=`<iframe src="${escapeHtml(normalizeEmbed(t.url))}" allow="fullscreen; autoplay"></iframe>`;
+    frame.innerHTML=`<iframe
+      src="${escapeHtml(normalizeEmbed(t.url))}"
+      title="Bài học trực tuyến"
+      referrerpolicy="strict-origin-when-cross-origin"
+      allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share; fullscreen"
+      allowfullscreen></iframe>`;
     return;
   }
   const type=(t.file.type||'').toLowerCase();
@@ -1266,21 +1290,15 @@ async function showTab(t){
   else if(type.startsWith('video/')) frame.innerHTML=`<video src="${escapeHtml(url)}" controls></video>`;
   else if(type==='application/pdf'||name.endsWith('.pdf')) frame.innerHTML=`<iframe src="${escapeHtml(url)}"></iframe>`;
   else if(name.endsWith('.html')||name.endsWith('.htm')){
-    frame.innerHTML='<div class="note">Đang tải bài học HTML...</div>';
-    try{
-      const res=await fetch(url,{cache:'no-store'});
-      if(!res.ok) throw new Error('HTTP '+res.status);
-      let htmlText=await res.text();
-      const baseHref=url.slice(0,url.lastIndexOf('/')+1);
-      const baseTag=`<base href="${escapeHtml(baseHref)}">`;
-      if(/<head[^>]*>/i.test(htmlText)) htmlText=htmlText.replace(/<head([^>]*)>/i,`<head$1>${baseTag}`);
-      else htmlText=baseTag+htmlText;
-      const blobUrl=URL.createObjectURL(new Blob([htmlText],{type:'text/html'}));
-      frame.innerHTML=`<iframe src="${blobUrl}" sandbox="allow-scripts allow-forms allow-modals allow-popups allow-downloads allow-same-origin"></iframe>`;
-    }catch(err){
-      console.error(err);
-      frame.innerHTML='<div class="note">Không mở được bài học HTML. Hãy tải tệp xuống để kiểm tra.</div>';
-    }
+    // Mở trực tiếp URL HTTPS của tệp HTML trên Supabase.
+    // Không chuyển thành blob: vì blob làm mất nguồn/referrer cần thiết cho YouTube Embed (lỗi 153).
+    frame.innerHTML=`<iframe
+      src="${escapeHtml(url)}"
+      title="${escapeHtml(t.file.name||'Bài học HTML')}"
+      referrerpolicy="strict-origin-when-cross-origin"
+      sandbox="allow-scripts allow-forms allow-modals allow-popups allow-popups-to-escape-sandbox allow-downloads allow-same-origin"
+      allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share; fullscreen"
+      allowfullscreen></iframe>`;
   }else{
     frame.innerHTML=`<div style="text-align:center;padding:25px"><div style="font-size:50px">📄</div><p>Trình duyệt không xem trực tiếp định dạng này.</p><button class="btn btn-primary" onclick="downloadFile(null,'${t.file.id}')">Tải tệp</button></div>`;
   }
